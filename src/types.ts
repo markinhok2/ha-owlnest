@@ -15,6 +15,35 @@ export type EntityDomain =
 export type LightStyle = 'point' | 'spot' | 'beam';
 
 /**
+ * Perfil LED : une lumiere etendue, lignes ou rectangle, qui suit une seule
+ * entite `light.*`.
+ *
+ * Toute la geometrie est relative a la position de l'ancre : deplacer l'ancre
+ * deplace le profil entier, sans rien recalculer. Le sens d'emission est
+ * `lightDirection` (vers le bas par defaut), comme pour un spot.
+ *
+ *   lines  un ou plusieurs segments, tous pilotes par la meme entite
+ *   rect   un cadre rectangulaire, que `size` etire de carre a rectangle
+ *   spots  des points isoles (spots), tous pilotes par la meme entite
+ */
+export type LedShape = 'lines' | 'rect' | 'spots';
+
+/** Un segment : deux extremites, decalees par rapport a la position de l'ancre. */
+export type LedSegment = [[number, number, number], [number, number, number]];
+
+export interface LedProfile {
+  shape: LedShape;
+  /** `lines` : les segments du profil. */
+  segments?: LedSegment[];
+  /** `spots` : la position de chaque spot. */
+  points?: [number, number, number][];
+  /** `rect` : largeur et profondeur, en unites du modele. */
+  size?: [number, number];
+  /** `rect` : rotation autour du sens d'emission, en radians. */
+  spin?: number;
+}
+
+/**
  * Nature d'une ancre — orthogonale au domaine de l'entité.
  *
  * Les descripteurs (entities/descriptors.ts) disent *quoi* affiche une ancre
@@ -107,6 +136,10 @@ export interface AnchorConfig {
   lightStyle?: LightStyle;
   lightIntensity?: number;
   lightDirection?: [number, number, number];
+  /** Perfil LED (lignes ou rectangle) : remplace le point lumineux. Voir led.ts. */
+  led?: LedProfile;
+  /** `switch` / `input_boolean` seulement : l'ancre eclaire le modele comme une lampe. */
+  illuminates?: boolean;
   visibleIf?: import('./rules/types').EntityCondition;
   precision?: number;   // decimal places for sensor display (e.g. 0 → "18", 1 → "17.6")
   icon?: string;        // override icon, e.g. "mdi:thermometer"
@@ -151,6 +184,10 @@ export interface OwlnestAnchor {
   lightStyle?: LightStyle;
   lightIntensity?: number;
   lightDirection?: [number, number, number];
+  /** Perfil LED (lignes ou rectangle) : remplace le point lumineux. Voir led.ts. */
+  led?: LedProfile;
+  /** `switch` / `input_boolean` seulement : l'ancre eclaire le modele comme une lampe. */
+  illuminates?: boolean;
   visibleIf?: import('./rules/types').EntityCondition; // show/hide overlay based on entity state
   precision?: number;
   icon?: string;
@@ -468,6 +505,10 @@ export interface CardConfig {
 export interface AnchorEntry {
   light: THREE.PointLight | THREE.SpotLight | null;
   lightTarget?: THREE.Object3D;
+  /** Perfil LED construit (groupe, lumieres, materiaux emissifs). */
+  ledRig?: import('./led').LedRig;
+  /** Intensite pleine de la lampe : sert a normaliser l'eclat du profil. */
+  ledFull?: number;
   worldPos: THREE.Vector3;
   entityId: string;
   domain: EntityDomain;
@@ -478,6 +519,10 @@ export interface AnchorEntry {
   lightStyle?: LightStyle;
   lightIntensity?: number;
   lightDirection?: [number, number, number];
+  /** Perfil LED (lignes ou rectangle) : remplace le point lumineux. Voir led.ts. */
+  led?: LedProfile;
+  /** `switch` / `input_boolean` seulement : l'ancre eclaire le modele comme une lampe. */
+  illuminates?: boolean;
   visibleIf?: import('./rules/types').EntityCondition;
   precision?: number;
   icon?: string;
@@ -524,6 +569,10 @@ export interface EditableAnchor {
   lightStyle?: LightStyle;
   lightIntensity?: number;
   lightDirection?: [number, number, number];
+  /** Perfil LED (lignes ou rectangle) : remplace le point lumineux. Voir led.ts. */
+  led?: LedProfile;
+  /** `switch` / `input_boolean` seulement : l'ancre eclaire le modele comme une lampe. */
+  illuminates?: boolean;
   visibleIf?: import('./rules/types').EntityCondition;
   precision?: number;
   icon?: string;

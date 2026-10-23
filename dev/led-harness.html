@@ -1,0 +1,72 @@
+<!doctype html>
+<!--
+  Banc d'essai des profils LED : une piece, trois lignes au plafond et un
+  panneau au mur, allumes. Sert a regler la calibration des RectAreaLight sans
+  Home Assistant. ?cm=1 exprime la piece en centimetres, comme un export
+  Sweet Home 3D ; ?mode=point force le repli PointLight.
+-->
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Owlnest — profils LED</title>
+  <style>body { margin: 0; background: #0b1020; } canvas { display: block; }
+    #info { position: fixed; left: 8px; top: 8px; color: #e2e8f0; font: 12px ui-monospace, monospace; }</style>
+</head>
+<body>
+  <div id="info"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { buildLedRig, applyLedState, defaultLed, nextSegment, ledUnit } from '/src/led.ts';
+
+    const q = new URLSearchParams(location.search);
+    const k = q.has('cm') ? 100 : 1;                // unites par metre
+    const W = 6 * k, H = 2.6 * k, D = 5 * k;        // piece
+    const span = Math.max(W, H, D);
+    const unit = ledUnit(span);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05070d);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01 * k, 100 * k);
+    camera.position.set(0, 1.5 * k, 2.4 * k);
+    camera.lookAt(0, 1.1 * k, -D / 2);
+
+    // Piece : six faces tournees vers l'interieur, materiau standard comme un GLB.
+    const mat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.9, side: THREE.BackSide });
+    const room = new THREE.Mesh(new THREE.BoxGeometry(W, H, D), mat);
+    room.position.set(0, H / 2, -D / 2);
+    scene.add(room);
+
+    const budget = { left: q.get('mode') === 'point' ? 0 : 16 };
+    const rigs = [];
+    const add = (led, pos, dir, intensity) => {
+      const rig = buildLedRig({
+        led, position: pos, direction: dir, unit,
+        areaBudget: budget, pointDistance: 8 * span / 12, pointDecay: 2,
+      });
+      scene.add(rig.group);
+      // Meme intensite qu'une lampe ponctuelle de reference : scale * 3 * k^2.
+      const full = (span / 12) ** 2 * 3 * intensity;
+      applyLedState(rig, full, new THREE.Color(1, 0.85, 0.6), full);
+      rigs.push(rig);
+    };
+
+    // Trois lignes au plafond.
+    const ceiling = defaultLed('lines', unit, [0, -1, 0]);
+    ceiling.segments[0] = [[-2 * k, 0, 0], [2 * k, 0, 0]];
+    for (let i = 0; i < 2; i++) ceiling.segments.push(nextSegment({ ...ceiling, segments: ceiling.segments }, 0.5 * k / 5 * 5, [0, -1, 0]));
+    ceiling.segments = ceiling.segments.map(([a, b], i) => [[a[0], a[1], (i - 1) * 0.8 * k], [b[0], b[1], (i - 1) * 0.8 * k]]);
+    add(ceiling, new THREE.Vector3(0, H - 0.02 * k, -D / 2), [0, -1, 0], 1);
+
+    // Un panneau a la paroi du fond, qui eclaire vers la piece (+Z).
+    add({ shape: 'rect', size: [1.2 * k, 0.8 * k], spin: 0 }, new THREE.Vector3(1.6 * k, 1.5 * k, -D + 0.02 * k), [0, 0, 1], 1);
+
+    document.getElementById('info').textContent =
+      `${rigs.map((r) => r.mode + ':' + r.lights.length).join('  ')}   unit=${unit.toFixed(3)}  ${k === 100 ? 'cm' : 'm'}`;
+    renderer.render(scene, camera);
+    window.__ready = true;
+  </script>
+</body>
+</html>

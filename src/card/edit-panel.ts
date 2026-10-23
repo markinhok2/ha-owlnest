@@ -2506,18 +2506,107 @@ export class EditPanel {
           currentStyle = id;
           syncStyleBtns();
           this.getEditor()?.updateAnchor(key, { lightStyle: id });
-          if (dirSection) dirSection.style.display = (id === 'spot' || id === 'beam') ? 'block' : 'none';
+          if (dirSection) dirSection.style.display = (id === 'spot' || id === 'beam' || !!anchor.led) ? 'block' : 'none';
           this.scheduleAutoSave();
         });
         styleBtns.push(btn);
         styleRow.appendChild(btn);
       });
       syncStyleBtns();
+      // Un profil LED prend le pas sur le style : les boutons restent, mais n'agissent plus.
+      if (anchor.led) styleRow.style.opacity = '0.35';
       container.appendChild(styleRow);
+
+      // ── Section: Profil LED ──────────────────────────────────────
+      secDiv(t('ledSection'));
+      const rebuild = () => {
+        const fresh = this.getEditor()?.anchors.get(key);
+        if (fresh) this._buildPropsSection(container, key, fresh, goBack);
+        this.syncLightsToScene();
+        this.requestRender();
+      };
+
+      const shapeRow = document.createElement('div');
+      shapeRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:8px;';
+      const shapes: { id: import('../types').LedShape | null; label: string; icon: string }[] = [
+        { id: null,    label: t('ledShapePoint'), icon: '\u25CB' },
+        { id: 'lines', label: t('ledShapeLines'), icon: '\u2630' },
+        { id: 'rect',  label: t('ledShapeRect'),  icon: '\u25AD' },
+      ];
+      shapes.forEach(({ id, label, icon }) => {
+        const on = (anchor.led?.shape ?? null) === id;
+        const btn = document.createElement('button');
+        btn.style.cssText = [
+          `border:1px solid ${on ? 'rgba(125,211,252,0.5)' : 'rgba(255,255,255,0.08)'}`,
+          'border-radius:7px', 'padding:5px 2px', 'cursor:pointer',
+          'font-size:10px', 'font-family:inherit', 'line-height:1.3',
+          'transition:all .15s',
+          `color:${on ? '#7dd3fc' : 'rgba(255,255,255,0.4)'}`,
+          `background:${on ? 'rgba(125,211,252,0.15)' : 'rgba(255,255,255,0.05)'}`,
+          'display:flex', 'flex-direction:column', 'align-items:center', 'gap:2px',
+        ].join(';');
+        btn.innerHTML = `<span style="font-size:14px">${icon}</span><span>${label}</span>`;
+        btn.addEventListener('click', () => {
+          if ((anchor.led?.shape ?? null) === id) return;
+          this.getEditor()?.setLedShape(key, id);
+          this.scheduleAutoSave();
+          rebuild();
+        });
+        shapeRow.appendChild(btn);
+      });
+      container.appendChild(shapeRow);
+
+      if (anchor.led) {
+        const ledHint = document.createElement('div');
+        ledHint.style.cssText = 'font-size:9px;color:#475569;margin-bottom:8px;line-height:1.5;';
+        ledHint.textContent = anchor.led.shape === 'rect' ? t('ledHintRect') : t('ledHint');
+        container.appendChild(ledHint);
+
+        if (anchor.led.shape === 'lines') {
+          (anchor.led.segments ?? []).forEach((seg, i) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:10px;color:#cbd5e1;';
+            const len = Math.hypot(seg[1][0] - seg[0][0], seg[1][1] - seg[0][1], seg[1][2] - seg[0][2]);
+            const name = document.createElement('span');
+            name.style.cssText = 'flex:1;';
+            name.textContent = `${t('ledLine')} ${i + 1}`;
+            const size = document.createElement('span');
+            size.style.cssText = 'color:#64748b;font-variant-numeric:tabular-nums;';
+            size.textContent = len.toFixed(len < 10 ? 2 : 0);
+            const del = document.createElement('button');
+            del.textContent = '\u00d7';
+            del.title = t('ledRemoveLine');
+            del.disabled = (anchor.led?.segments?.length ?? 0) <= 1;
+            del.style.cssText = 'background:none;border:none;color:#f87171;cursor:pointer;font-size:14px;padding:0 4px;line-height:1;';
+            if (del.disabled) del.style.opacity = '0.25';
+            del.addEventListener('click', () => {
+              this.getEditor()?.removeLedSegment(key, i);
+              this.scheduleAutoSave();
+              rebuild();
+            });
+            row.append(name, size, del);
+            container.appendChild(row);
+          });
+
+          const addBtn = document.createElement('button');
+          addBtn.style.cssText = 'width:100%;background:rgba(125,211,252,0.1);border:1px solid rgba(125,211,252,0.3);border-radius:7px;color:#7dd3fc;padding:6px;font-size:10px;font-family:inherit;cursor:pointer;margin-bottom:8px;';
+          addBtn.textContent = t('ledAddLine');
+          addBtn.addEventListener('click', () => {
+            this.getEditor()?.addLedSegment(key);
+            this.scheduleAutoSave();
+            rebuild();
+          });
+          container.appendChild(addBtn);
+        } else {
+          sliderField(t('ledSpin'), 0, 360, 5, Math.round(((anchor.led.spin ?? 0) * 180 / Math.PI + 360) % 360), '#7dd3fc',
+            (v) => `${Math.round(v)}\u00b0`,
+            (v) => this.getEditor()?.updateLed(key, { spin: v * Math.PI / 180 }));
+        }
+      }
 
       // ── Section: Orientation ─────────────────────────────────────
       dirSection = document.createElement('div');
-      dirSection.style.display = (currentStyle === 'spot' || currentStyle === 'beam') ? 'block' : 'none';
+      dirSection.style.display = (currentStyle === 'spot' || currentStyle === 'beam' || !!anchor.led) ? 'block' : 'none';
 
       const dirHeader = document.createElement('div');
       dirHeader.style.cssText = 'font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin:14px 0 7px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.06);';

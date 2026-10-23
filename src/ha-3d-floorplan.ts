@@ -5,7 +5,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
 import type { Hass, CardConfig, AnchorEntry, SavedView, EditableAnchor, OwlnestScene } from './types';
 import { syncLights, stepTransitions } from './lights';
-import { loadGLTF, detectAnchors, buildAnchorsFromEditable, rebuildAnchorLight, lightTargetPos } from './model';
+import { loadGLTF, detectAnchors, buildAnchorsFromEditable, rebuildAnchorLight, lightTargetPos, disposeAnchorLights } from './model';
+import { applyLedState, ledSignature } from './led';
 import { modelErrorKey, httpStatus } from './model-errors';
 import { AnchorOverlay, SensorOverlay, ClusterOverlay, LabelOverlay, CameraOverlay, pulseOverlay } from './overlay';
 import type { ClusterItem } from './overlay';
@@ -1188,13 +1189,7 @@ export class Ha3dFloorplan extends HTMLElement {
   /** Reconstruit ancres, lumières et pastilles depuis la configuration effective. */
   private _rebuildAnchors() {
     if (!this.scene || !this._modelRoot) return;
-    this.anchors.forEach((entry) => {
-      if (entry.light) {
-        this.scene?.remove(entry.light);
-        entry.light.dispose();
-      }
-      if (entry.lightTarget) this.scene?.remove(entry.lightTarget);
-    });
+    this.anchors.forEach((entry) => disposeAnchorLights(entry, this.scene));
     this.anchors = detectAnchors(this._modelRoot, this.scene, this._effectiveConfig, this._modelSpan);
     this._createOverlays();
     if (this._hass) {
@@ -1449,6 +1444,8 @@ export class Ha3dFloorplan extends HTMLElement {
         lightStyle: entry.lightStyle,
         lightIntensity: entry.lightIntensity,
         lightDirection: entry.lightDirection,
+        led: entry.led ? structuredClone(entry.led) : undefined,
+        illuminates: entry.illuminates,
         visibleIf: entry.visibleIf,
         precision: entry.precision,
         icon: entry.icon,
@@ -1665,13 +1662,7 @@ export class Ha3dFloorplan extends HTMLElement {
     const editable = new Map<string, EditableAnchor>(this._editor!.anchors as Map<string, EditableAnchor>);
     this._editor!.deactivate();
 
-    this.anchors.forEach((entry) => {
-      if (entry.light) {
-        this.scene?.remove(entry.light);
-        entry.light.dispose();
-      }
-      if (entry.lightTarget) this.scene?.remove(entry.lightTarget);
-    });
+    this.anchors.forEach((entry) => disposeAnchorLights(entry, this.scene));
 
     this.anchors = buildAnchorsFromEditable(editable, this.scene!, this._effectiveConfig, this._modelSpan);
 
@@ -1702,6 +1693,30 @@ export class Ha3dFloorplan extends HTMLElement {
       // Always sync position (gizmo drag)
       entry.worldPos.copy(ea.position);
       entry.visibleIf = ea.visibleIf;
+
+      if (entry.lightIntensity !== ea.lightIntensity) {
+        entry.lightIntensity = ea.lightIntensity;
+        if (this._hass) syncLights(this.anchors, this._hass, this._effectiveConfig, this._modelSpan);
+      }
+
+      // Profil LED : la geometrie se reconstruit quand elle change, jamais a chaque image.
+      if (ea.entity.split('.')[0] === 'light' && (ea.led || entry.ledRig)) {
+        const stale = !ea.led || !entry.ledRig
+          || entry.ledRig.signature !== ledSignature(ea.led, ea.position, ea.lightDirection);
+        if (stale) {
+          rebuildAnchorLight(entry, this.scene!, this._effectiveConfig, ea.lightStyle ?? 'point', ea.lightDirection, this._modelSpan, ea.led ? structuredClone(ea.led) : undefined);
+          if (entry.ledRig) {
+            entry.ledRig.current.intensity = entry.targetIntensity;
+            entry.ledRig.current.color.copy(entry.targetColor);
+            applyLedState(entry.ledRig, entry.targetIntensity, entry.targetColor, entry.ledFull ?? 0);
+          } else if (entry.light) {
+            entry.light.intensity = entry.targetIntensity;
+            entry.light.color.copy(entry.targetColor);
+            entry.light.visible = entry.targetIntensity > 0.01;
+          }
+        }
+        return;
+      }
       if (entry.light) entry.light.position.copy(ea.position);
       if (entry.lightTarget) {
         entry.lightTarget.position.copy(lightTargetPos(ea.position, ea.lightDirection));
@@ -2864,10 +2879,7 @@ export class Ha3dFloorplan extends HTMLElement {
     this.overlays.forEach((o) => o.destroy());
     this.overlays.clear();
     // Remove lights created by anchors
-    this.anchors.forEach((e) => {
-      if (e.light) { this.scene?.remove(e.light); e.light.dispose(); }
-      if (e.lightTarget) this.scene?.remove(e.lightTarget);
-    });
+    this.anchors.forEach((e) => disposeAnchorLights(e, this.scene));
     this.anchors.clear();
     // Remove ground, occlusion, weather particles
     this._env?.removeGround();
@@ -3687,10 +3699,7 @@ export class Ha3dFloorplan extends HTMLElement {
     this._clusters.clear();
     this.overlays.forEach((o) => o.destroy());
     this.overlays.clear();
-    this.anchors.forEach((e) => {
-      if (e.light) { this.scene?.remove(e.light); e.light.dispose(); }
-      if (e.lightTarget) this.scene?.remove(e.lightTarget);
-    });
+    this.anchors.forEach((e) => disposeAnchorLights(e, this.scene));
     this.anchors.clear();
     this._hud?.remove();
     this._hud = null;

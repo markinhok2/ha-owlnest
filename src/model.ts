@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { AnchorEntry, AnchorConfig, CardConfig, EditableAnchor, LightStyle } from './types';
 import { qualityFromConfig } from './quality';
 import { lightScale } from './lights';
+import { buildLedRig, disposeLedRig, ledUnit, type LedRig } from './led';
+import type { LedProfile } from './types';
 import { bustCache, shouldRetryUncached } from './model-errors';
 
 function fetchGLTF(url: string): Promise<THREE.Group> {
@@ -100,6 +102,45 @@ export function makeLight(
   return { light };
 }
 
+/** Budget de RectAreaLight partage par tous les profils LED d'une construction. */
+export function ledBudget(config: CardConfig): { left: number } {
+  return { left: qualityFromConfig(config).ledAreaLights };
+}
+
+/** Construit le profil LED d'une ancre et l'ajoute a la scene. */
+export function makeLedRig(
+  led: LedProfile,
+  pos: THREE.Vector3,
+  direction: [number, number, number] | undefined,
+  scene: THREE.Scene,
+  config: CardConfig,
+  span: number | undefined,
+  budget: { left: number },
+): LedRig {
+  const rig = buildLedRig({
+    led,
+    position: pos,
+    direction,
+    unit: ledUnit(span),
+    areaBudget: budget,
+    pointDistance: config.lights?.distance ?? 8 * lightScale(span),
+    pointDecay: config.lights?.decay ?? 2,
+  });
+  scene.add(rig.group);
+  return rig;
+}
+
+/** Retire de la scene tout ce qu'une ancre y a pose : lampe, cible, profil LED. */
+export function disposeAnchorLights(entry: AnchorEntry, scene: THREE.Scene | null | undefined): void {
+  if (!scene) return;
+  if (entry.light) { scene.remove(entry.light); entry.light.dispose(); }
+  if (entry.lightTarget) scene.remove(entry.lightTarget);
+  if (entry.ledRig) disposeLedRig(entry.ledRig, scene);
+  entry.light = null;
+  entry.lightTarget = undefined;
+  entry.ledRig = undefined;
+}
+
 /**
  * Rebuild the Three.js light for an existing AnchorEntry in-place.
  * Disposes the old light/target, creates a new one with the given style/direction.
@@ -111,21 +152,28 @@ export function rebuildAnchorLight(
   style: LightStyle,
   direction?: [number, number, number],
   span?: number,
+  led?: LedProfile,
 ): void {
-  if (entry.light) { scene.remove(entry.light); entry.light.dispose(); }
-  if (entry.lightTarget) scene.remove(entry.lightTarget);
+  const previous = entry.ledRig?.current;
+  disposeAnchorLights(entry, scene);
 
-  if (entry.domain !== 'light') {
-    entry.light = null;
-    entry.lightTarget = undefined;
+  if (entry.domain !== 'light') return;
+
+  entry.lightStyle = style;
+  entry.lightDirection = direction;
+  entry.led = led;
+
+  if (led) {
+    const rig = makeLedRig(led, entry.worldPos, direction, scene, config, span, ledBudget(config));
+    // Ne pas repartir de zero : le profil reconstruit pendant l'edition reste allume.
+    if (previous) { rig.current.intensity = previous.intensity; rig.current.color.copy(previous.color); }
+    entry.ledRig = rig;
     return;
   }
 
   const { light, target } = makeLight(entry.worldPos, scene, config, style, direction, span);
   entry.light = light;
   entry.lightTarget = target;
-  entry.lightStyle = style;
-  entry.lightDirection = direction;
 }
 
 export function detectAnchors(
@@ -136,6 +184,7 @@ export function detectAnchors(
 ): Map<string, AnchorEntry> {
   const anchors = new Map<string, AnchorEntry>();
   const cfgAnchors = config.anchors;
+  const budget = ledBudget(config);
 
   // New format: AnchorConfig[]
   if (Array.isArray(cfgAnchors)) {
@@ -143,12 +192,19 @@ export function detectAnchors(
       const key = `anchor_cfg_${idx}`;
       const domain = ac.entity.split('.')[0];
       const worldPos = new THREE.Vector3(...ac.position);
-      const { light, target } = domain === 'light'
+      const isLed = domain === 'light' && !!ac.led;
+      const { light, target } = domain === 'light' && !isLed
         ? makeLight(worldPos, scene, config, ac.lightStyle ?? 'point', ac.lightDirection, span)
         : { light: null, target: undefined };
+      const ledRig = isLed
+        ? makeLedRig(ac.led!, worldPos, ac.lightDirection, scene, config, span, budget)
+        : undefined;
       anchors.set(key, {
         light,
         lightTarget: target,
+        ledRig,
+        led: ac.led,
+        illuminates: ac.illuminates,
         worldPos,
         entityId: ac.entity,
         domain,
@@ -206,15 +262,23 @@ export function buildAnchorsFromEditable(
   span?: number,
 ): Map<string, AnchorEntry> {
   const anchors = new Map<string, AnchorEntry>();
+  const budget = ledBudget(config);
   editable.forEach((ea, key) => {
     const domain = ea.entity.split('.')[0];
     const worldPos = ea.position.clone();
-    const { light, target } = domain === 'light'
+    const isLed = domain === 'light' && !!ea.led;
+    const { light, target } = domain === 'light' && !isLed
       ? makeLight(worldPos, scene, config, ea.lightStyle ?? 'point', ea.lightDirection, span)
       : { light: null, target: undefined };
+    const ledRig = isLed
+      ? makeLedRig(ea.led!, worldPos, ea.lightDirection, scene, config, span, budget)
+      : undefined;
     anchors.set(key, {
       light,
       lightTarget: target,
+      ledRig,
+      led: ea.led,
+      illuminates: ea.illuminates,
       worldPos,
       entityId: ea.entity,
       domain,

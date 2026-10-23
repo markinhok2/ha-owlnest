@@ -98,8 +98,30 @@ export class FakeHass {
         self.callService(domain, service, data);
       },
       callWS: <T>(msg: Record<string, unknown>) => self.callWS(msg) as Promise<T>,
+      fetchWithAuth: (path: string, init: RequestInit) => self.fetchWithAuth(path, init),
     } as unknown as Hass;
     for (const fn of this.listeners) fn(this.current);
+  }
+
+  /** Morceaux de GLB reçus, par nom de modèle. */
+  private uploads = new Map<string, Uint8Array[]>();
+
+  /**
+   * Remplace l'intégration pour l'import d'un modèle : les morceaux restent en
+   * mémoire et le GLB est servi par une URL `blob:` valable le temps de la page.
+   */
+  private async fetchWithAuth(path: string, init: RequestInit): Promise<Response> {
+    const url = new URL(path, location.href);
+    if (!url.pathname.endsWith('/api/owlnest/upload')) return fetch(path, init);
+    const name = url.searchParams.get('name') ?? 'model';
+    const parts = url.searchParams.get('offset') === '0' ? [] : this.uploads.get(name) ?? [];
+    parts.push(new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer()));
+    this.uploads.set(name, parts);
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+    if (url.searchParams.get('final') !== '1') return json({ received: parts.length });
+    this.uploads.delete(name);
+    const blob = new Blob(parts as BlobPart[], { type: 'model/gltf-binary' });
+    return json({ url: URL.createObjectURL(blob), size: blob.size });
   }
 
   private callService(domain: string, service: string, data: Record<string, unknown>) {

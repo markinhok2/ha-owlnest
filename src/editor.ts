@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { openEntityPicker } from './entities/picker';
-import type { EditableAnchor, LightStyle } from './types';
+import type { EditableAnchor, LedShape, LedProfile, LightStyle } from './types';
+import { defaultLed, emissionDir, ledFrame, ledPrimitives, nextSegment, rectSize } from './led';
 import { t } from './i18n';
 
 export type EditorTool = 'select' | 'add' | 'delete' | 'rotate' | 'add_panel';
@@ -21,6 +22,21 @@ const AXIS_DIRS: Record<string, THREE.Vector3> = {
   y: new THREE.Vector3(0, 1, 0),
   z: new THREE.Vector3(0, 0, 1),
 };
+
+/** Copie profonde d'une ancre : `position` et `led` sont des objets mutables. */
+function cloneAnchor(a: EditableAnchor): EditableAnchor {
+  return { ...a, position: a.position.clone(), led: a.led ? structuredClone(a.led) : undefined };
+}
+
+/** Une ancre a un sens d'emission si c'est un spot, un rayon ou un profil LED. */
+function hasDirection(a: EditableAnchor | null | undefined): boolean {
+  return !!a && (a.lightStyle === 'spot' || a.lightStyle === 'beam' || !!a.led);
+}
+
+/** Poignee d'un profil LED : une extremite de segment, ou un bord du rectangle. */
+type LedHandle =
+  | { kind: 'end'; index: number; end: 0 | 1 }
+  | { kind: 'rect'; which: 'w' | 'd' | 'c' };
 
 export class AnchorEditor {
   onChanged: (() => void) | null = null;
@@ -59,6 +75,14 @@ export class AnchorEditor {
   private _rotInitDir: [number, number, number] = [0, -1, 0];
   private _rotDirLine: THREE.Line | null = null;
 
+  // Profils LED : contours de toutes les ancres, poignees de la selection
+  private _ledGroup: THREE.Group | null = null;
+  private _ledHandles: THREE.Mesh[] = [];
+  private _ledDrag: LedHandle | null = null;
+  private _pendingNormal: THREE.Vector3 | null = null;
+  /** Normale de la surface ou chaque ancre a ete posee : sens d'emission par defaut d'un LED. */
+  private _normals = new Map<string, THREE.Vector3>();
+
   // G-grab mode (Blender-style immediate move)
   private _grabMode = false;
   private _grabConstraint: 'x' | 'y' | 'z' | null = null;
@@ -91,6 +115,16 @@ export class AnchorEditor {
     this._overlayContainer = overlayContainer;
   }
 
+  private _changed() {
+    this._rebuildLedVisuals();
+    this.onChanged?.();
+  }
+
+  private _selChanged(key: string | null) {
+    this._rebuildLedVisuals();
+    this.onSelectionChange?.(key);
+  }
+
   get active() { return this._active; }
   get tool() { return this._tool; }
   get anchors() { return this._anchors; }
@@ -110,9 +144,10 @@ export class AnchorEditor {
     this._undoStack = [];
     this._redoStack = [];
     this._anchors = new Map(
-      [...editable.entries()].map(([k, v]) => [k, { ...v, position: v.position.clone() }]),
+      [...editable.entries()].map(([k, v]) => [k, cloneAnchor(v)]),
     );
     this._anchors.forEach((a, key) => this._addMarker(key, a.position, a.hidden));
+    this._rebuildLedVisuals();
     this._canvas.addEventListener('pointerdown', this._onPointerDown, true);
     this._canvas.addEventListener('pointermove', this._onPointerMove, true);
     this._canvas.addEventListener('pointerup', this._onPointerUp, true);
@@ -133,6 +168,8 @@ export class AnchorEditor {
       (m.material as THREE.Material).dispose();
     });
     this._markers.clear();
+    this._clearLedVisuals();
+    this._normals.clear();
     this._closePopup();
     this._selectedKey = null;
     this._hoveredKey = null;
@@ -149,11 +186,11 @@ export class AnchorEditor {
     if (tool === 'add' || tool === 'delete') {
       this._clearGizmo();
       this._selectedKey = null;
-      this.onSelectionChange?.(null);
+      this._selChanged(null);
     }
     // Keep rot gizmo visible if selected anchor is spot/beam
     const selAnchor = this._selectedKey ? this._anchors.get(this._selectedKey) : null;
-    const isDirectional = selAnchor?.lightStyle === 'spot' || selAnchor?.lightStyle === 'beam';
+    const isDirectional = hasDirection(selAnchor);
     if (tool !== 'rotate' && !isDirectional) {
       this._clearRotGizmo();
     }
@@ -179,11 +216,11 @@ export class AnchorEditor {
     // posait à trois millimètres sur un export en centimètres, donc dessus.
     const step = this._markerRadius * 3;
     const pos = src.position.clone().add(new THREE.Vector3(step, 0, step));
-    const newAnchor: EditableAnchor = { ...src, position: pos };
+    const newAnchor: EditableAnchor = { ...cloneAnchor(src), position: pos };
     this._anchors.set(key, newAnchor);
     this._addMarker(key, pos, newAnchor.hidden);
     this._selectAnchor(key);
-    this.onChanged?.();
+    this._changed();
   }
 
   /** Batch-update a property on every anchor (single undo entry). */
@@ -199,7 +236,7 @@ export class AnchorEditor {
         mat.color.setHex(a.hidden ? 0x888888 : (key === this._selectedKey ? 0xFFFFFF : 0xFFDD00));
       }
     });
-    this.onChanged?.();
+    this._changed();
   }
 
   selectAnchor(key: string) { this._selectAnchor(key); }
@@ -210,8 +247,8 @@ export class AnchorEditor {
     this._pushUndo();
     Object.assign(anchor, props);
     // Sync rotation gizmo when lightStyle changes on selected anchor
-    if ('lightStyle' in props && key === this._selectedKey) {
-      const isDirectional = anchor.lightStyle === 'spot' || anchor.lightStyle === 'beam';
+    if (('lightStyle' in props || 'led' in props) && key === this._selectedKey) {
+      const isDirectional = hasDirection(anchor);
       if (isDirectional) {
         this._clearRotGizmo();
         this._buildRotGizmo(anchor.position, anchor.lightDirection);
@@ -226,7 +263,7 @@ export class AnchorEditor {
       mat.transparent = !!anchor.hidden;
       mat.color.setHex(anchor.hidden ? 0x888888 : (key === this._selectedKey ? 0xFFFFFF : 0xFFDD00));
     }
-    this.onChanged?.();
+    this._changed();
   }
 
   // ── Undo / Redo ─────────────────────────────────────────────────────────
@@ -235,7 +272,7 @@ export class AnchorEditor {
     return [...this._anchors.entries()].map(([key, a]) => ({
       key,
       // Vector3 n'est pas clonable par le spread : sa position doit l'etre a part.
-      anchor: { ...a, position: a.position.clone() },
+      anchor: cloneAnchor(a),
     }));
   }
 
@@ -247,7 +284,7 @@ export class AnchorEditor {
   private _restore(snap: AnchorSnap, prevSelectedKey?: string) {
     this._clearGizmo();
     this._selectedKey = null;
-    this.onSelectionChange?.(null);
+    this._selChanged(null);
     this._markers.forEach((m) => {
       this._scene.remove(m);
       m.geometry.dispose();
@@ -257,7 +294,7 @@ export class AnchorEditor {
     this._anchors.clear();
 
     for (const s of snap) {
-      const restored: EditableAnchor = { ...s.anchor, position: s.anchor.position.clone() };
+      const restored: EditableAnchor = cloneAnchor(s.anchor);
       this._anchors.set(s.key, restored);
       this._addMarker(s.key, restored.position, restored.hidden);
     }
@@ -266,8 +303,8 @@ export class AnchorEditor {
     if (keyToReselect) {
       this._selectAnchor(keyToReselect);
     }
-    this.onSelectionChange?.(this._selectedKey);
-    this.onChanged?.();
+    this._selChanged(this._selectedKey);
+    this._changed();
   }
 
   undo() {
@@ -316,9 +353,9 @@ export class AnchorEditor {
     if (this._selectedKey === key) {
       this._clearGizmo();
       this._selectedKey = null;
-      this.onSelectionChange?.(null);
+      this._selChanged(null);
     }
-    this.onChanged?.();
+    this._changed();
   }
 
   // ── Gizmo ──────────────────────────────────────────────────────────────
@@ -340,12 +377,12 @@ export class AnchorEditor {
         );
       });
       // Show rotation gizmo for directional lights regardless of active tool
-      const isDirectional = anchor.lightStyle === 'spot' || anchor.lightStyle === 'beam';
+      const isDirectional = hasDirection(anchor);
       if (this._tool === 'rotate' || isDirectional) {
         this._buildRotGizmo(anchor.position, anchor.lightDirection);
       }
     }
-    this.onSelectionChange?.(key);
+    this._selChanged(key);
   }
 
   private _buildGizmo(pos: THREE.Vector3) {
@@ -425,8 +462,7 @@ export class AnchorEditor {
   private _buildRotGizmo(pos: THREE.Vector3, dir?: [number, number, number]) {
     this._clearRotGizmo();
     const anchor = this._selectedKey ? this._anchors.get(this._selectedKey) : null;
-    const style = anchor?.lightStyle ?? 'point';
-    if (style !== 'spot' && style !== 'beam') return;
+    if (!hasDirection(anchor)) return;
 
     const group = new THREE.Group();
     group.position.copy(pos);
@@ -501,6 +537,220 @@ export class AnchorEditor {
     positions.needsUpdate = true;
   }
 
+  // ── Profils LED ─────────────────────────────────────────────────────────
+
+  /** Cree, remplace ou retire le profil LED d'une ancre (`null` : retour au point). */
+  setLedShape(key: string, shape: LedShape | null) {
+    const a = this._anchors.get(key);
+    if (!a) return;
+    if (!shape) { this.updateAnchor(key, { led: undefined }); return; }
+    // Une surface a ete visee a la pose : le profil emet vers la piece. Sur une
+    // surface horizontale on garde « vers le bas » : la camera de l'editeur voit
+    // le plafond par le dessus, donc sa normale pointerait vers le haut.
+    const normal = this._normals.get(key);
+    const wall = normal && Math.abs(normal.y) < 0.7;
+    const direction = a.lightDirection ?? (wall ? [normal.x, normal.y, normal.z] as [number, number, number] : undefined);
+    this.updateAnchor(key, { led: defaultLed(shape, this._markerRadius, direction), lightDirection: direction });
+  }
+
+  addLedSegment(key: string) {
+    const a = this._anchors.get(key);
+    if (!a?.led || a.led.shape !== 'lines') return;
+    const led = structuredClone(a.led);
+    led.segments = [...(led.segments ?? []), nextSegment(led, this._markerRadius, a.lightDirection)];
+    this.updateAnchor(key, { led });
+  }
+
+  removeLedSegment(key: string, index: number) {
+    const a = this._anchors.get(key);
+    if (!a?.led?.segments || a.led.segments.length <= 1) return;
+    const led = structuredClone(a.led);
+    led.segments!.splice(index, 1);
+    this.updateAnchor(key, { led });
+  }
+
+  updateLed(key: string, patch: Partial<LedProfile>) {
+    const a = this._anchors.get(key);
+    if (!a?.led) return;
+    this.updateAnchor(key, { led: { ...structuredClone(a.led), ...patch } });
+  }
+
+  private _clearLedVisuals() {
+    if (!this._ledGroup) return;
+    this._ledGroup.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) (m.material as THREE.Material).dispose();
+    });
+    this._scene.remove(this._ledGroup);
+    this._ledGroup = null;
+    this._ledHandles = [];
+  }
+
+  /**
+   * Contour de chaque profil LED, et poignees de celui qui est selectionne.
+   * Reconstruit en bloc : quelques lignes et spheres, rien a economiser.
+   */
+  private _rebuildLedVisuals() {
+    this._clearLedVisuals();
+    if (!this._active) return;
+    const R = this._markerRadius;
+    const group = new THREE.Group();
+
+    this._anchors.forEach((a, key) => {
+      if (!a.led) return;
+      const selected = key === this._selectedKey;
+      const prims = ledPrimitives(a.led, a.position, a.lightDirection, R);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: selected ? 0x7DD3FC : 0xFFDD00,
+        depthTest: false, transparent: true, opacity: selected ? 1 : 0.55,
+      });
+
+      if (a.led.shape === 'rect') {
+        // Contour exterieur du cadre ; les quatre rubans sont dessines par le rig.
+        const [w, d] = rectSize(a.led, R);
+        const { u, v } = ledFrame(emissionDir(a.lightDirection), a.led.spin);
+        const pts = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) =>
+          a.position.clone().addScaledVector(u, x * w / 2).addScaledVector(v, y * d / 2));
+        const loop = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), lineMat);
+        loop.renderOrder = 997;
+        group.add(loop);
+      } else {
+        for (const p of prims) {
+          const pts = [-p.width / 2, p.width / 2].map((x) => new THREE.Vector3(x, 0, 0).applyQuaternion(p.quaternion).add(p.center));
+          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat);
+          line.renderOrder = 997;
+          group.add(line);
+        }
+      }
+
+      if (!selected || this._tool === 'add' || this._tool === 'delete') return;
+
+      const handle = (pos: THREE.Vector3, info: LedHandle, color: number) => {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(R * 0.7, 12, 8),
+          new THREE.MeshBasicMaterial({ color, depthTest: false }),
+        );
+        m.position.copy(pos);
+        m.renderOrder = 1001;
+        m.userData.ledHandle = info;
+        group.add(m);
+        this._ledHandles.push(m);
+      };
+
+      if (a.led.shape === 'lines') {
+        (a.led.segments ?? []).forEach(([p0, p1], index) => {
+          handle(a.position.clone().add(new THREE.Vector3(...p0)), { kind: 'end', index, end: 0 }, 0x7DD3FC);
+          handle(a.position.clone().add(new THREE.Vector3(...p1)), { kind: 'end', index, end: 1 }, 0x7DD3FC);
+        });
+      } else {
+        const [w, d] = a.led.size ?? [R * 14, R * 14];
+        const { u, v } = ledFrame(emissionDir(a.lightDirection), a.led.spin);
+        handle(a.position.clone().addScaledVector(u, w / 2), { kind: 'rect', which: 'w' }, 0xFF6B6B);
+        handle(a.position.clone().addScaledVector(v, d / 2), { kind: 'rect', which: 'd' }, 0x6BFF8F);
+        handle(a.position.clone().addScaledVector(u, w / 2).addScaledVector(v, d / 2), { kind: 'rect', which: 'c' }, 0xFFFFFF);
+      }
+    });
+
+    this._scene.add(group);
+    this._ledGroup = group;
+  }
+
+  private _startLedDrag(e: PointerEvent, handle: LedHandle) {
+    this._pushUndo();
+    this._ledDrag = handle;
+    this._canvas.setPointerCapture(e.pointerId);
+    this.onDragStart?.('gizmo');
+  }
+
+  /**
+   * Deplace une poignee. Par defaut elle colle a la surface du modele sous le
+   * curseur, ce qui pose un ruban sur un plafond ou un mur sans effort ; Alt la
+   * garde sur son plan horizontal, Maj sur un plan vertical face a la camera,
+   * pour atteindre les trois axes sans surface a viser.
+   */
+  private _moveLedHandle(e: PointerEvent) {
+    const key = this._selectedKey;
+    const handle = this._ledDrag;
+    const a = key ? this._anchors.get(key) : null;
+    if (!handle || !a?.led) return;
+
+    this._raycaster.setFromCamera(this._ndc(e), this._camera);
+
+    if (handle.kind === 'end') {
+      const seg = a.led.segments?.[handle.index];
+      if (!seg) return;
+      const current = a.position.clone().add(new THREE.Vector3(...seg[handle.end]));
+      const target = new THREE.Vector3();
+      let found = false;
+
+      if (!e.altKey && !e.shiftKey) {
+        const hit = this._raycaster.intersectObject(this._model, true)[0];
+        if (hit) {
+          target.copy(hit.point);
+          if (hit.face) {
+            const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+            if (n.dot(this._raycaster.ray.direction) > 0) n.negate();
+            target.addScaledVector(n, this._markerRadius * 0.15);
+          }
+          found = true;
+        }
+      }
+      if (!found) {
+        const plane = new THREE.Plane();
+        if (e.shiftKey) {
+          const dir = new THREE.Vector3();
+          this._camera.getWorldDirection(dir);
+          dir.y = 0;
+          if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
+          plane.setFromNormalAndCoplanarPoint(dir.normalize(), current);
+        } else {
+          plane.set(new THREE.Vector3(0, 1, 0), -current.y);
+        }
+        if (!this._raycaster.ray.intersectPlane(plane, target)) return;
+      }
+
+      seg[handle.end] = [target.x - a.position.x, target.y - a.position.y, target.z - a.position.z];
+    } else {
+      const dir = emissionDir(a.lightDirection);
+      const { u, v } = ledFrame(dir, a.led.spin);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(dir, a.position);
+      const hit = new THREE.Vector3();
+      if (!this._raycaster.ray.intersectPlane(plane, hit)) return;
+      const local = hit.sub(a.position);
+      const min = this._markerRadius * 0.4;
+      const [w0, d0] = a.led.size ?? [this._markerRadius * 14, this._markerRadius * 14];
+      a.led.size = [
+        handle.which === 'd' ? w0 : Math.max(min, 2 * Math.abs(local.dot(u))),
+        handle.which === 'w' ? d0 : Math.max(min, 2 * Math.abs(local.dot(v))),
+      ];
+    }
+    this._changed();
+  }
+
+  /**
+   * Recentre l'ancre sur son profil apres un deplacement de poignee : la pastille
+   * et le gizmo suivent alors le profil au lieu de rester a l'endroit de la pose.
+   */
+  private _recenterLed(key: string) {
+    const a = this._anchors.get(key);
+    const segs = a?.led?.shape === 'lines' ? a.led.segments : undefined;
+    if (!a || !segs?.length) return;
+    const c = new THREE.Vector3();
+    segs.forEach(([p, q]) => c.add(new THREE.Vector3(...p)).add(new THREE.Vector3(...q)));
+    c.divideScalar(segs.length * 2);
+    if (c.lengthSq() < 1e-10) return;
+    segs.forEach((seg) => {
+      seg[0] = [seg[0][0] - c.x, seg[0][1] - c.y, seg[0][2] - c.z];
+      seg[1] = [seg[1][0] - c.x, seg[1][1] - c.y, seg[1][2] - c.z];
+    });
+    a.position.add(c);
+    this._markers.get(key)?.position.copy(a.position);
+    this._gizmoGroup?.position.copy(a.position);
+    this._rotGizmoGroup?.position.copy(a.position);
+    this._changed();
+  }
+
   // ── NDC helper ─────────────────────────────────────────────────────────
 
   private _ndc(e: PointerEvent): THREE.Vector2 {
@@ -569,11 +819,12 @@ export class AnchorEditor {
       };
       this._pushUndo();
       this._anchors.set(key, anchor);
+      if (this._pendingNormal) this._normals.set(key, this._pendingNormal.clone());
       this._addMarker(key, anchor.position);
       this.setTool('select');
       this._selectAnchor(key);
       this._pendingPos = null;
-      this.onChanged?.();
+      this._changed();
       this.onToolChange?.('select');
     };
 
@@ -633,7 +884,7 @@ export class AnchorEditor {
         this._rotGizmoGroup?.position.copy(this._grabOrigin);
         this._markers.get(this._selectedKey)?.position.copy(this._grabOrigin);
       }
-      this.onChanged?.();
+      this._changed();
     }
     this._grabMode = false;
     this._grabConstraint = null;
@@ -674,8 +925,7 @@ export class AnchorEditor {
     const sep = () => { const s = document.createElement('div'); s.style.cssText = 'height:1px;background:rgba(255,255,255,0.07);margin:3px 0;'; return s; };
 
     menu.appendChild(item(t('hintGrab'), 'G', () => { this.setTool('select'); this._selectAnchor(key); this._startGrab(); }));
-    const style = anchor.lightStyle ?? 'point';
-    if (style === 'spot' || style === 'beam') {
+    if (hasDirection(anchor)) {
       menu.appendChild(item(t('hintRotate'), 'R', () => { this.setTool('rotate'); this._selectAnchor(key); }));
     }
     menu.appendChild(sep());
@@ -748,7 +998,7 @@ export class AnchorEditor {
         break;
       case 'Escape':
         e.preventDefault();
-        if (this._selectedKey) { this._clearGizmo(); this._clearRotGizmo(); this._selectedKey = null; this.onSelectionChange?.(null); }
+        if (this._selectedKey) { this._clearGizmo(); this._clearRotGizmo(); this._selectedKey = null; this._selChanged(null); }
         else this.setTool('select');
         break;
       case 's': case 'S': this.setTool('select'); break;
@@ -827,6 +1077,15 @@ export class AnchorEditor {
           return;
         }
       }
+      // Poignees du profil LED selectionne
+      if (this._ledHandles.length) {
+        const hh = this._raycaster.intersectObjects(this._ledHandles, false)[0];
+        if (hh) {
+          e.stopImmediatePropagation();
+          this._startLedDrag(e, hh.object.userData.ledHandle as LedHandle);
+          return;
+        }
+      }
       // Marker select (+ arm direct-drag)
       const hits = this._raycaster.intersectObjects([...this._markers.values()], false);
       if (hits.length > 0) {
@@ -842,7 +1101,7 @@ export class AnchorEditor {
       // Click empty → deselect
       this._clearGizmo(); this._clearRotGizmo();
       this._selectedKey = null;
-      this.onSelectionChange?.(null);
+      this._selChanged(null);
     }
 
     // Add tool
@@ -851,6 +1110,13 @@ export class AnchorEditor {
       if (hits.length > 0) {
         e.stopImmediatePropagation();
         this._pendingPos = hits[0].point.clone();
+        this._pendingNormal = null;
+        if (hits[0].face) {
+          const n = hits[0].face.normal.clone().transformDirection(hits[0].object.matrixWorld);
+          // Face vue par l'arriere (maillage a simple face) : on la retourne vers la camera.
+          if (n.dot(this._raycaster.ray.direction) > 0) n.negate();
+          this._pendingNormal = n;
+        }
         this._showEntityPicker();
       } else {
         // Click outside model — cancel placement
@@ -887,6 +1153,13 @@ export class AnchorEditor {
       return;
     }
 
+    // Poignee de profil LED
+    if (this._ledDrag) {
+      e.stopImmediatePropagation();
+      this._moveLedHandle(e);
+      return;
+    }
+
     // G-grab mode
     if (this._grabMode && this._selectedKey) {
       e.stopImmediatePropagation();
@@ -913,7 +1186,7 @@ export class AnchorEditor {
       this._gizmoGroup?.position.copy(newPos);
       this._rotGizmoGroup?.position.copy(newPos);
       this._markers.get(this._selectedKey)?.position.copy(newPos);
-      this.onChanged?.();
+      this._changed();
       return;
     }
 
@@ -939,7 +1212,7 @@ export class AnchorEditor {
       const anchor = this._anchors.get(this._selectedKey);
       if (anchor) anchor.lightDirection = newDir;
       this._updateRotGizmoDir(newDir);
-      this.onChanged?.();
+      this._changed();
       return;
     }
 
@@ -982,7 +1255,7 @@ export class AnchorEditor {
         this._markers.get(this._selectedKey)?.position.copy(newPos);
       }
     }
-    this.onChanged?.();
+    this._changed();
   };
 
   private _onPointerUp = (e: PointerEvent) => {
@@ -996,6 +1269,12 @@ export class AnchorEditor {
     if (this._grabMode && e.button === 0) {
       this._canvas.releasePointerCapture(e.pointerId);
       this._confirmGrab();
+    }
+    if (this._ledDrag) {
+      this._canvas.releasePointerCapture(e.pointerId);
+      this._ledDrag = null;
+      if (this._selectedKey) this._recenterLed(this._selectedKey);
+      this.onDragEnd?.();
     }
     if (this._rotAxis) {
       this._canvas.releasePointerCapture(e.pointerId);

@@ -44,6 +44,12 @@ export interface QualityProfile {
    * par camera sur une tablette en Wi-Fi.
    */
   cameraRefreshMs: number;
+  /**
+   * Nombre maximal de RectAreaLight pour les profils LED. Chacune est evaluee
+   * par pixel et par materiau (integrale LTC) : au-dela, le profil retombe sur
+   * une seule PointLight en son centre.
+   */
+  ledAreaLights: number;
 }
 
 export type ResolvedLevel = Exclude<QualityLevel, 'auto'>;
@@ -60,6 +66,7 @@ const PROFILES: Record<ResolvedLevel, QualityProfile> = {
     cardTextureWidth: 1024,
     maxFps: 60,
     cameraRefreshMs: 3000,
+    ledAreaLights: 16,
   },
   // Les ombres d'ancres tombent dès ce niveau : c'est le gain le plus important
   // pour la perte visuelle la plus faible, le soleil continuant d'ombrer.
@@ -74,6 +81,7 @@ const PROFILES: Record<ResolvedLevel, QualityProfile> = {
     cardTextureWidth: 768,
     maxFps: 45,
     cameraRefreshMs: 6000,
+    ledAreaLights: 6,
   },
   // PCF plutôt que BasicShadowMap : le gain de performance de Basic est
   // marginal, ses bords crénelés ne le sont pas.
@@ -88,6 +96,7 @@ const PROFILES: Record<ResolvedLevel, QualityProfile> = {
     cardTextureWidth: 512,
     maxFps: 30,
     cameraRefreshMs: 12000,
+    ledAreaLights: 0,
   },
 };
 

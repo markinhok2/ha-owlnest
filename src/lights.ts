@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { AnchorEntry, CardConfig, Hass } from './types';
 import { describeEntity } from './entities/descriptors';
 import { REFERENCE_SPAN, modelScale } from './scale';
+import { stepLedRig } from './led';
 
 /**
  * Facteur d'échelle des lumières, déduit de l'envergure du modèle.
@@ -56,6 +57,8 @@ export function syncLights(
       const a = stateObj.attributes;
       const intensityMult = entry.lightIntensity ?? 1;
       entry.targetIntensity = desc.level(stateObj) * scale * 3 * intensityMult;
+      // Un profil LED a besoin de l'intensite pleine pour borner son eclat visible.
+      entry.ledFull = scale * 3 * intensityMult;
       if (Array.isArray(a.rgb_color)) {
         const [r, g, b] = a.rgb_color as number[];
         entry.targetColor.setRGB(r / 255, g / 255, b / 255);
@@ -89,7 +92,15 @@ export function stepTransitions(
   const alpha = 1 - Math.exp(-dt / tau);
   let active = false;
 
-  anchors.forEach(({ light, targetIntensity, targetColor }) => {
+  anchors.forEach((entry) => {
+    const { light, targetIntensity, targetColor } = entry;
+
+    // Profil LED : meme lissage, applique a toutes ses lumieres et a ses panneaux.
+    if (entry.ledRig) {
+      if (stepLedRig(entry.ledRig, targetIntensity, targetColor, entry.ledFull ?? 0, alpha)) active = true;
+      return;
+    }
+
     if (!light) return;
     const dI = Math.abs(light.intensity - targetIntensity);
     const dR = Math.abs(light.color.r - targetColor.r);
