@@ -93,15 +93,20 @@ Style and direction are configured in the anchor properties in edit mode.
 
 ### LED profiles
 
-A `light` entity can also be drawn as a LED profile instead of a point: one or more **lines** (for example three strips in one room, all following the same entity) or a **rectangle** (a panel, stretched from square to any proportion).
+A `light` entity can also be drawn as a LED profile instead of a point: one or more **lines** (for example three strips in one room, all following the same entity) a **rectangle** (a frame, stretched from square to any proportion) or a few **spots**.
 
-In the anchor properties, pick *Lines* or *Rectangle* under **LED profile**.
+In the anchor properties, pick *Lines*, *Rectangle* or *Spots* under **LED profile**.
 
 - **Lines:** drag the round handles to move each end. They stick to walls and ceilings; hold `Alt` to stay on the horizontal plane, `Shift` for a vertical one. *+ Add line* adds another strip to the same entity.
-- **Rectangle:** the red handle sets the width, the green one the depth, the white one both. A slider rotates it.
+- **Spots:** each one is a light of its own, all driven by the same entity. *+ Add spot* adds one and the handles place them. The style row sets the cone (Ambient is a bare bulb).
+- **Rectangle:** a frame, not a filled panel. The red handle sets the width, the green one the depth, the white one both. A slider rotates it.
 - **Direction:** the profile lights the side it faces. When you place the anchor on a wall or a ceiling, it faces the room; the rotation rings turn it.
 
 The light comes from area lights, which do not cast shadows. Each one is costly, so the quality level caps them (16 on high, 6 on balanced); past the cap, or on low, a profile falls back to a single point light at its centre.
+
+#### Switches as lights
+
+A `switch` or `input_boolean` does not light the model by default (a TV plug should not light the room). Tick **Light up the model** in its anchor properties and it behaves like a light that is either on or off, in the colour chosen in the same panel. Spots and LED profiles are then available too, so one switch can drive three yard spots.
 
 ### Interactions
 

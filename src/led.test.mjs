@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
   ledUnit, emissionDir, ledFrame, defaultLed, nextSegment, ledPrimitives,
-  buildLedRig, applyLedState, stepLedRig, ledSignature, AREA_GAIN,
+  buildLedRig, applyLedState, stepLedRig, ledSignature, AREA_GAIN, nextPoint,
 } from './led.mjs';
 
 const ORIGIN = new THREE.Vector3(0, 0, 0);
@@ -206,4 +206,57 @@ test('la transition converge vers la cible puis s’arrête', () => {
   assert.ok(steps < 500, 'doit se stabiliser');
   near(rig.current.intensity, 5, 0.01);
   assert.equal(stepLedRig(rig, 5, target, 5, 0.3), false);
+});
+
+const spots = (points, style, left = 16) => buildLedRig({
+  led: { shape: 'spots', points }, position: ORIGIN, unit: 0.1, style,
+  areaBudget: budget(left), pointDistance: 8, pointDecay: 2,
+});
+
+test('chaque spot a sa lampe et sa pastille, sans consommer le budget des RectAreaLight', () => {
+  const b = budget(2);
+  const rig = buildLedRig({
+    led: { shape: 'spots', points: [[0, 0, 0], [1, 0, 0], [2, 0, 0]] }, position: ORIGIN, unit: 0.1,
+    style: 'spot', areaBudget: b, pointDistance: 8, pointDecay: 2,
+  });
+  assert.equal(rig.mode, 'spots');
+  assert.equal(rig.lights.length, 3);
+  assert.equal(rig.materials.length, 3);
+  assert.equal(b.left, 2);
+});
+
+test('le style choisit la lampe : ampoule, cone large ou cone etroit', () => {
+  assert.equal(spots([[0, 0, 0]], 'point').lights[0].isPointLight, true);
+  const wide = spots([[0, 0, 0]], 'spot').lights[0];
+  const narrow = spots([[0, 0, 0]], 'beam').lights[0];
+  assert.equal(wide.isSpotLight, true);
+  assert.ok(narrow.angle < wide.angle);
+});
+
+test('les spots visent le sens d’emission, vers le bas par defaut', () => {
+  const l = spots([[1, 0, 2]], 'spot').lights[0];
+  nearVec(l.target.position.clone().sub(l.position).normalize(), [0, -1, 0]);
+});
+
+test('chaque spot eclaire a pleine intensite, sans division par une surface', () => {
+  const rig = spots([[0, 0, 0], [1, 0, 0], [2, 0, 0]], 'spot');
+  applyLedState(rig, 5, new THREE.Color(1, 0.5, 0), 6);
+  assert.ok(rig.lights.every((l) => l.intensity === 5 && l.visible));
+  applyLedState(rig, 0, new THREE.Color(1, 1, 1), 6);
+  assert.ok(rig.lights.every((l) => !l.visible));
+});
+
+test('le style fait partie de la signature des spots, pas de celle des rubans', () => {
+  const sp = { shape: 'spots', points: [[0, 0, 0]] };
+  assert.notEqual(ledSignature(sp, ORIGIN, undefined, 'spot'), ledSignature(sp, ORIGIN, undefined, 'beam'));
+  const li = defaultLed('lines', 0.1);
+  assert.equal(ledSignature(li, ORIGIN, undefined, 'spot'), ledSignature(li, ORIGIN, undefined, 'beam'));
+});
+
+test('le spot ajoute est decale du dernier, dans le plan d’emission', () => {
+  const led = defaultLed('spots', 0.1);
+  assert.equal(led.points.length, 1);
+  const p = nextPoint(led, 0.1, [0, -1, 0]);
+  near(p[1], 0);
+  assert.ok(Math.hypot(...p) > 0);
 });

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { AnchorEntry, AnchorConfig, CardConfig, EditableAnchor, LightStyle } from './types';
 import { qualityFromConfig } from './quality';
-import { lightScale } from './lights';
+import { lightScale, emitsLight } from './lights';
 import { buildLedRig, disposeLedRig, ledUnit, type LedRig } from './led';
 import type { LedProfile } from './types';
 import { bustCache, shouldRetryUncached } from './model-errors';
@@ -116,9 +116,11 @@ export function makeLedRig(
   config: CardConfig,
   span: number | undefined,
   budget: { left: number },
+  style?: LightStyle,
 ): LedRig {
   const rig = buildLedRig({
     led,
+    style,
     position: pos,
     direction,
     unit: ledUnit(span),
@@ -157,14 +159,14 @@ export function rebuildAnchorLight(
   const previous = entry.ledRig?.current;
   disposeAnchorLights(entry, scene);
 
-  if (entry.domain !== 'light') return;
+  if (!emitsLight(entry.domain, entry.illuminates)) return;
 
   entry.lightStyle = style;
   entry.lightDirection = direction;
   entry.led = led;
 
   if (led) {
-    const rig = makeLedRig(led, entry.worldPos, direction, scene, config, span, ledBudget(config));
+    const rig = makeLedRig(led, entry.worldPos, direction, scene, config, span, ledBudget(config), style);
     // Ne pas repartir de zero : le profil reconstruit pendant l'edition reste allume.
     if (previous) { rig.current.intensity = previous.intensity; rig.current.color.copy(previous.color); }
     entry.ledRig = rig;
@@ -192,12 +194,13 @@ export function detectAnchors(
       const key = `anchor_cfg_${idx}`;
       const domain = ac.entity.split('.')[0];
       const worldPos = new THREE.Vector3(...ac.position);
-      const isLed = domain === 'light' && !!ac.led;
-      const { light, target } = domain === 'light' && !isLed
+      const emits = emitsLight(domain, ac.illuminates);
+      const isLed = emits && !!ac.led;
+      const { light, target } = emits && !isLed
         ? makeLight(worldPos, scene, config, ac.lightStyle ?? 'point', ac.lightDirection, span)
         : { light: null, target: undefined };
       const ledRig = isLed
-        ? makeLedRig(ac.led!, worldPos, ac.lightDirection, scene, config, span, budget)
+        ? makeLedRig(ac.led!, worldPos, ac.lightDirection, scene, config, span, budget, ac.lightStyle)
         : undefined;
       anchors.set(key, {
         light,
@@ -266,12 +269,13 @@ export function buildAnchorsFromEditable(
   editable.forEach((ea, key) => {
     const domain = ea.entity.split('.')[0];
     const worldPos = ea.position.clone();
-    const isLed = domain === 'light' && !!ea.led;
-    const { light, target } = domain === 'light' && !isLed
+    const emits = emitsLight(domain, ea.illuminates);
+    const isLed = emits && !!ea.led;
+    const { light, target } = emits && !isLed
       ? makeLight(worldPos, scene, config, ea.lightStyle ?? 'point', ea.lightDirection, span)
       : { light: null, target: undefined };
     const ledRig = isLed
-      ? makeLedRig(ea.led!, worldPos, ea.lightDirection, scene, config, span, budget)
+      ? makeLedRig(ea.led!, worldPos, ea.lightDirection, scene, config, span, budget, ea.lightStyle)
       : undefined;
     anchors.set(key, {
       light,

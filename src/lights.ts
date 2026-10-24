@@ -28,6 +28,15 @@ export function intensityScale(span?: number): number {
   return k * k;
 }
 
+/**
+ * Une ancre eclaire le modele si c'est une lampe, ou un interrupteur que
+ * l'utilisateur a declare comme tel (`illuminates`). Les autres interrupteurs
+ * (prise de la TV, verrou...) ne doivent pas allumer la piece.
+ */
+export function emitsLight(domain: string, illuminates?: boolean): boolean {
+  return domain === 'light' || (!!illuminates && (domain === 'switch' || domain === 'input_boolean'));
+}
+
 export function syncLights(
   anchors: Map<string, AnchorEntry>,
   hass: Hass,
@@ -68,6 +77,15 @@ export function syncLights(
       } else {
         entry.targetColor.set(0xffffff);
       }
+      return;
+    }
+
+    // Un interrupteur declare comme lampe : tout ou rien, dans la couleur choisie.
+    if (emitsLight(entry.domain, entry.illuminates)) {
+      const mult = entry.lightIntensity ?? 1;
+      entry.targetIntensity = desc.isOn(stateObj) ? scale * 3 * mult : 0;
+      entry.ledFull = scale * 3 * mult;
+      entry.targetColor.set(entry.color ?? 0xffffff);
       return;
     }
 

@@ -93,15 +93,20 @@ Le style et la direction se configurent dans les propriétés de l'ancre en mode
 
 ### Profils LED
 
-Une entité `light` peut aussi se dessiner en profil LED plutôt qu'en point : une ou plusieurs **lignes** (par exemple trois rubans dans une pièce, tous liés à la même entité) ou un **rectangle** (un panneau, étirable du carré à toute proportion).
+Une entité `light` peut aussi se dessiner en profil LED plutôt qu'en point : une ou plusieurs **lignes** (par exemple trois rubans dans une pièce, tous liés à la même entité) un **cadre rectangulaire** (étirable du carré à toute proportion) ou quelques **spots**.
 
-Dans les propriétés de l'ancre, choisissez *Lignes* ou *Rectangle* sous **Profil LED**.
+Dans les propriétés de l'ancre, choisissez *Lignes*, *Rectangle* ou *Spots* sous **Profil LED**.
 
 - **Lignes :** glissez les poignées rondes pour déplacer chaque extrémité. Elles se collent aux murs et aux plafonds ; `Alt` garde le plan horizontal, `Maj` un plan vertical. *+ Ajouter une ligne* ajoute un ruban à la même entité.
-- **Rectangle :** la poignée rouge règle la largeur, la verte la profondeur, la blanche les deux. Un curseur le fait tourner.
+- **Spots :** chacun est une lumière à part entière, tous pilotés par la même entité. *+ Ajouter un spot* en ajoute un et les poignées les placent. Le style règle le cône (Ambiance = ampoule nue).
+- **Rectangle :** un cadre, pas un panneau plein. La poignée rouge règle la largeur, la verte la profondeur, la blanche les deux. Un curseur le fait tourner.
 - **Direction :** le profil éclaire le côté vers lequel il regarde. Posée sur un mur ou un plafond, l'ancre regarde la pièce ; les anneaux de rotation l'orientent.
 
 La lumière vient de lumières de surface, qui ne projettent pas d'ombre. Chacune coûte cher : le niveau de qualité les plafonne (16 en haut, 6 en équilibré) ; au-delà, ou en bas, un profil se replie sur une seule lampe ponctuelle en son centre.
+
+#### Interrupteurs en lampes
+
+Un `switch` ou un `input_boolean` n'éclaire pas le modèle par défaut (la prise d'une télé ne doit pas allumer la pièce). Cochez **Éclairer le modèle** dans les propriétés de l'ancre : il se comporte alors comme une lampe allumée ou éteinte, dans la couleur choisie dans le même panneau. Spots et profils LED deviennent disponibles : un interrupteur peut donc piloter trois spots de jardin.
 
 ### Interactions
 

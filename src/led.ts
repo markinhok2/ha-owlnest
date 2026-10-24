@@ -16,7 +16,7 @@
  */
 import * as THREE from 'three';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
-import type { LedProfile, LedSegment, LedShape } from './types';
+import type { LedProfile, LedSegment, LedShape, LightStyle } from './types';
 
 /**
  * Unite de longueur du profil, deduite de l'envergure du modele.
@@ -65,6 +65,7 @@ export function defaultLed(
   direction?: [number, number, number],
 ): LedProfile {
   if (shape === 'rect') return { shape, size: [unit * 14, unit * 14], spin: 0 };
+  if (shape === 'spots') return { shape, points: [[0, 0, 0]] };
   const { u } = ledFrame(emissionDir(direction));
   const h = unit * 8;
   return {
@@ -93,6 +94,18 @@ export function nextSegment(
   const shift = (p: [number, number, number]): [number, number, number] =>
     [p[0] + side.x, p[1] + side.y, p[2] + side.z];
   return [shift(last[0]), shift(last[1])];
+}
+
+/** Nouveau spot, decale du dernier dans le plan d'emission. */
+export function nextPoint(
+  led: LedProfile,
+  unit: number,
+  direction?: [number, number, number],
+): [number, number, number] {
+  const pts = led.points ?? [];
+  const last = pts[pts.length - 1] ?? [0, 0, 0];
+  const { u } = ledFrame(emissionDir(direction));
+  return [last[0] + u.x * unit * 8, last[1] + u.y * unit * 8, last[2] + u.z * unit * 8];
 }
 
 /** Une surface emettrice : un segment ou le rectangle entier. */
@@ -176,7 +189,8 @@ function basis(x: THREE.Vector3, y: THREE.Vector3, z: THREE.Vector3): THREE.Quat
 
 export interface LedRig {
   group: THREE.Group;
-  mode: 'area' | 'point';
+  /** `area` : RectAreaLight par ruban ; `point` : repli sur une PointLight ; `spots` : une lampe par spot. */
+  mode: 'area' | 'point' | 'spots';
   lights: THREE.Light[];
   /** Surface emettrice totale : repartit la puissance entre les segments. */
   totalArea: number;
@@ -193,6 +207,8 @@ export interface LedRigOptions {
   position: THREE.Vector3;
   direction?: [number, number, number];
   unit: number;
+  /** Style des spots (`spots` seulement) : `point` ampoule, `spot` cone large, `beam` cone etroit. */
+  style?: LightStyle;
   /** RectAreaLight encore disponibles ; sinon le profil retombe sur une PointLight. */
   areaBudget: { left: number };
   pointDistance: number;
@@ -214,11 +230,59 @@ export function ledSignature(
   led: LedProfile,
   position: THREE.Vector3,
   direction?: [number, number, number],
+  style?: LightStyle,
 ): string {
-  return JSON.stringify([led, position.toArray(), direction ?? null]);
+  return JSON.stringify([led, position.toArray(), direction ?? null, led.shape === 'spots' ? style ?? 'point' : null]);
+}
+
+/** Des spots isoles : une lampe et une pastille visible par point. */
+function buildSpotsRig(o: LedRigOptions): LedRig {
+  const group = new THREE.Group();
+  const lights: THREE.Light[] = [];
+  const materials: THREE.MeshBasicMaterial[] = [];
+  const e = emissionDir(o.direction);
+  const style = o.style ?? 'point';
+  const reach = o.pointDistance * (style === 'point' ? 1 : 1.5);
+
+  for (const p of o.led.points ?? []) {
+    const pos = o.position.clone().add(new THREE.Vector3(...p));
+    const mat = new THREE.MeshBasicMaterial({ color: OFF_COLOR, toneMapped: false });
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(o.unit * 0.5, 12, 8), mat);
+    dot.position.copy(pos);
+    dot.renderOrder = 1;
+    dot.userData.ledMesh = true;
+    group.add(dot);
+    materials.push(mat);
+
+    let light: THREE.Light;
+    if (style === 'point') {
+      light = new THREE.PointLight(0xffffff, 0, reach, o.pointDecay);
+    } else {
+      const spot = new THREE.SpotLight(
+        0xffffff, 0, reach,
+        style === 'spot' ? Math.PI / 5 : Math.PI / 10,
+        style === 'spot' ? 0.25 : 0.04,
+        o.pointDecay,
+      );
+      spot.target.position.copy(pos).addScaledVector(e, 4);
+      group.add(spot.target);
+      light = spot;
+    }
+    light.position.copy(pos);
+    light.visible = false;
+    group.add(light);
+    lights.push(light);
+  }
+
+  return {
+    group, mode: 'spots', lights, totalArea: 0, materials,
+    current: { intensity: 0, color: new THREE.Color(0xffffff) },
+    signature: ledSignature(o.led, o.position, o.direction, o.style),
+  };
 }
 
 export function buildLedRig(o: LedRigOptions): LedRig {
+  if (o.led.shape === 'spots') return buildSpotsRig(o);
   const prims = ledPrimitives(o.led, o.position, o.direction, o.unit);
   const group = new THREE.Group();
   const lights: THREE.Light[] = [];
@@ -273,7 +337,7 @@ export function buildLedRig(o: LedRigOptions): LedRig {
     totalArea,
     materials,
     current: { intensity: 0, color: new THREE.Color(0xffffff) },
-    signature: ledSignature(o.led, o.position, o.direction),
+    signature: ledSignature(o.led, o.position, o.direction, o.style),
   };
 }
 

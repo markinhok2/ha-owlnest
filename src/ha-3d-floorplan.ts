@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
 import type { Hass, CardConfig, AnchorEntry, SavedView, EditableAnchor, OwlnestScene } from './types';
-import { syncLights, stepTransitions } from './lights';
+import { syncLights, stepTransitions, emitsLight } from './lights';
 import { loadGLTF, detectAnchors, buildAnchorsFromEditable, rebuildAnchorLight, lightTargetPos, disposeAnchorLights } from './model';
 import { applyLedState, ledSignature } from './led';
 import { modelErrorKey, httpStatus } from './model-errors';
@@ -1694,15 +1694,25 @@ export class Ha3dFloorplan extends HTMLElement {
       entry.worldPos.copy(ea.position);
       entry.visibleIf = ea.visibleIf;
 
-      if (entry.lightIntensity !== ea.lightIntensity) {
+      // Couleur et statut « lampe » d'un interrupteur : la lumiere en depend.
+      const lampChanged = entry.illuminates !== ea.illuminates;
+      if (entry.lightIntensity !== ea.lightIntensity || entry.color !== ea.color || lampChanged) {
         entry.lightIntensity = ea.lightIntensity;
+        entry.color = ea.color;
+        entry.illuminates = ea.illuminates;
         if (this._hass) syncLights(this.anchors, this._hass, this._effectiveConfig, this._modelSpan);
+      }
+      const emits = emitsLight(ea.entity.split('.')[0], ea.illuminates);
+      if (lampChanged && !emits) {
+        disposeAnchorLights(entry, this.scene);
+        entry.led = undefined;
+        entry.targetIntensity = 0;
       }
 
       // Profil LED : la geometrie se reconstruit quand elle change, jamais a chaque image.
-      if (ea.entity.split('.')[0] === 'light' && (ea.led || entry.ledRig)) {
+      if (emits && (ea.led || entry.ledRig)) {
         const stale = !ea.led || !entry.ledRig
-          || entry.ledRig.signature !== ledSignature(ea.led, ea.position, ea.lightDirection);
+          || entry.ledRig.signature !== ledSignature(ea.led, ea.position, ea.lightDirection, ea.lightStyle);
         if (stale) {
           rebuildAnchorLight(entry, this.scene!, this._effectiveConfig, ea.lightStyle ?? 'point', ea.lightDirection, this._modelSpan, ea.led ? structuredClone(ea.led) : undefined);
           if (entry.ledRig) {
@@ -1726,7 +1736,9 @@ export class Ha3dFloorplan extends HTMLElement {
       const newStyle = ea.lightStyle ?? 'point';
       const oldStyle = entry.lightStyle ?? 'point';
 
-      if (ea.entity.split('.')[0] === 'light' && newStyle !== oldStyle) {
+      // Un interrupteur qui devient lampe n'a pas encore de lumiere : on la cree.
+      const needsLight = emits && !entry.light && !entry.ledRig;
+      if (emits && (newStyle !== oldStyle || needsLight)) {
         // Rebuild light with new style
         rebuildAnchorLight(entry, this.scene!, this._effectiveConfig, newStyle, ea.lightDirection, this._modelSpan);
         // Restore last intensity

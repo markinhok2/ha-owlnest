@@ -5,6 +5,7 @@ import type { AnchorEditor, EditorTool } from '../editor';
 import type { OwlnestRule } from '../rules/types';
 import { normalizeRule } from '../rules/types';
 import { t, tn, setLang } from '../i18n';
+import { emitsLight } from '../lights';
 import { makeDraggable, type WindowPos } from './draggable';
 import { openEntityPicker } from '../entities/picker';
 import { deleteScene, summarizeScenes } from '../scene';
@@ -1861,6 +1862,10 @@ export class EditPanel {
     // Les réglages de lumière, de précision et d'action n'ont de sens que pour
     // une ancre liée à une entité.
     const isLight = isEntityKind && domain === 'light';
+    // Un interrupteur peut eclairer le modele si l'utilisateur le declare : la
+    // couleur ne vient alors pas de l'entite, et le reglage reste disponible.
+    const isSwitchLike = isEntityKind && (domain === 'switch' || domain === 'input_boolean');
+    const emitsHere = isEntityKind && emitsLight(domain, anchor.illuminates);
     const isSensor = isEntityKind && (domain === 'sensor' || domain === 'binary_sensor');
 
     // ── Back navigation ───────────────────────────────────────────────
@@ -2461,9 +2466,31 @@ export class EditPanel {
       container.appendChild(precHint);
     }
 
-    // ── Section: Lumière ─────────────────────────────────────────────
-    if (isLight) {
+    // ── Interrupteur → lampe ─────────────────────────────────────────
+    if (isSwitchLike) {
       secDiv(t('anchorSectionLight'));
+      const lampRow = document.createElement('label');
+      lampRow.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:11px;color:#cbd5e1;cursor:pointer;margin-bottom:4px;';
+      const lampChk = document.createElement('input');
+      lampChk.type = 'checkbox';
+      lampChk.checked = !!anchor.illuminates;
+      lampChk.addEventListener('change', () => {
+        this.getEditor()?.updateAnchor(key, { illuminates: lampChk.checked || undefined });
+        this.scheduleAutoSave();
+        const fresh = this.getEditor()?.anchors.get(key);
+        if (fresh) this._buildPropsSection(container, key, fresh, goBack);
+      });
+      lampRow.append(lampChk, document.createTextNode(t('illuminates')));
+      container.appendChild(lampRow);
+      const lampHint = document.createElement('div');
+      lampHint.style.cssText = 'font-size:9px;color:#475569;margin-bottom:8px;line-height:1.5;';
+      lampHint.textContent = t('illuminatesHint');
+      container.appendChild(lampHint);
+    }
+
+    // ── Section: Lumière ─────────────────────────────────────────────
+    if (emitsHere) {
+      if (!isSwitchLike) secDiv(t('anchorSectionLight'));
 
       sliderField(t('anchorLightIntensity'), 0.1, 3, 0.1, anchor.lightIntensity ?? 1, '#fbbf24',
         (v) => `×${v.toFixed(1)}`,
@@ -2514,7 +2541,7 @@ export class EditPanel {
       });
       syncStyleBtns();
       // Un profil LED prend le pas sur le style : les boutons restent, mais n'agissent plus.
-      if (anchor.led) styleRow.style.opacity = '0.35';
+      if (anchor.led && anchor.led.shape !== 'spots') styleRow.style.opacity = '0.35';
       container.appendChild(styleRow);
 
       // ── Section: Profil LED ──────────────────────────────────────
@@ -2527,11 +2554,12 @@ export class EditPanel {
       };
 
       const shapeRow = document.createElement('div');
-      shapeRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:8px;';
+      shapeRow.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:8px;';
       const shapes: { id: import('../types').LedShape | null; label: string; icon: string }[] = [
         { id: null,    label: t('ledShapePoint'), icon: '\u25CB' },
         { id: 'lines', label: t('ledShapeLines'), icon: '\u2630' },
         { id: 'rect',  label: t('ledShapeRect'),  icon: '\u25AD' },
+        { id: 'spots', label: t('ledShapeSpots'), icon: '∴' },
       ];
       shapes.forEach(({ id, label, icon }) => {
         const on = (anchor.led?.shape ?? null) === id;
@@ -2559,7 +2587,7 @@ export class EditPanel {
       if (anchor.led) {
         const ledHint = document.createElement('div');
         ledHint.style.cssText = 'font-size:9px;color:#475569;margin-bottom:8px;line-height:1.5;';
-        ledHint.textContent = anchor.led.shape === 'rect' ? t('ledHintRect') : t('ledHint');
+        ledHint.textContent = anchor.led.shape === 'rect' ? t('ledHintRect') : anchor.led.shape === 'spots' ? t('ledHintSpots') : t('ledHint');
         container.appendChild(ledHint);
 
         if (anchor.led.shape === 'lines') {
@@ -2593,6 +2621,65 @@ export class EditPanel {
           addBtn.textContent = t('ledAddLine');
           addBtn.addEventListener('click', () => {
             this.getEditor()?.addLedSegment(key);
+            this.scheduleAutoSave();
+            rebuild();
+          });
+          container.appendChild(addBtn);
+        } else if (anchor.led.shape === 'spots') {
+          (anchor.led.points ?? []).forEach((_, i) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:10px;color:#cbd5e1;';
+            const name = document.createElement('span');
+            name.style.cssText = 'flex:1;';
+            name.textContent = `${t('ledSpot')} ${i + 1}`;
+            name.style.cursor = 'pointer';
+            name.addEventListener('click', () => this.getEditor()?.focusLedPoint(key, i));
+            const del = document.createElement('button');
+            del.textContent = '×';
+            del.title = t('ledRemoveSpot');
+            del.disabled = (anchor.led?.points?.length ?? 0) <= 1;
+            del.style.cssText = 'background:none;border:none;color:#f87171;cursor:pointer;font-size:14px;padding:0 4px;line-height:1;';
+            if (del.disabled) del.style.opacity = '0.25';
+            del.addEventListener('click', () => {
+              this.getEditor()?.removeLedPoint(key, i);
+              this.scheduleAutoSave();
+              rebuild();
+            });
+            row.append(name, del);
+            container.appendChild(row);
+          });
+
+          if ((anchor.led.points?.length ?? 0) > 1) {
+            const alignRow = document.createElement('div');
+            alignRow.style.cssText = 'display:flex;align-items:center;gap:4px;margin:6px 0 2px;font-size:10px;color:#94a3b8;';
+            const alignLabel = document.createElement('span');
+            alignLabel.style.cssText = 'flex:1;';
+            alignLabel.textContent = t('ledAlign');
+            alignRow.appendChild(alignLabel);
+            ([['x', '#ff6b6b'], ['y', '#6bff8f'], ['z', '#6bb5ff']] as const).forEach(([axis, color]) => {
+              const b = document.createElement('button');
+              b.textContent = axis.toUpperCase();
+              b.style.cssText = `width:34px;background:rgba(255,255,255,0.05);border:1px solid ${color};border-radius:6px;color:${color};padding:4px 0;font-size:10px;font-weight:700;font-family:inherit;cursor:pointer;`;
+              b.addEventListener('click', () => {
+                this.getEditor()?.alignLedPoints(key, axis);
+                this.scheduleAutoSave();
+                this.syncLightsToScene();
+                this.requestRender();
+              });
+              alignRow.appendChild(b);
+            });
+            container.appendChild(alignRow);
+            const alignHint = document.createElement('div');
+            alignHint.style.cssText = 'font-size:9px;color:#475569;margin-bottom:8px;line-height:1.5;';
+            alignHint.textContent = t('ledAlignHint');
+            container.appendChild(alignHint);
+          }
+
+          const addBtn = document.createElement('button');
+          addBtn.style.cssText = 'width:100%;background:rgba(125,211,252,0.1);border:1px solid rgba(125,211,252,0.3);border-radius:7px;color:#7dd3fc;padding:6px;font-size:10px;font-family:inherit;cursor:pointer;margin-bottom:8px;';
+          addBtn.textContent = t('ledAddSpot');
+          addBtn.addEventListener('click', () => {
+            this.getEditor()?.addLedPoint(key);
             this.scheduleAutoSave();
             rebuild();
           });
